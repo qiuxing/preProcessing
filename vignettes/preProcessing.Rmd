@@ -1,0 +1,352 @@
+---
+title: "Using preProcessing package"
+author: "Xing Qiu, Yiping Pang, Qiuyi Wu"
+date: "`r format(Sys.time(), '%B %d, %Y')`"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Using preProcessing package}
+  %\VignetteEngine{knitr::rmarkdown}
+  \usepackage[utf8]{inputenc}
+---
+
+```{r init, echo=FALSE, include=FALSE, message=FALSE}
+
+## set some global options for the R code chunks
+library(knitr)
+library(rmarkdown)
+opts_chunk$set(echo=TRUE, message=TRUE, cache=TRUE, warning=FALSE, results='hide', fig.path='results/fig', dpi=300, cache.path='.cache/')
+options(digits=3)
+
+## manually generate the report
+## rmarkdown::render("vignettes/preProcessing.Rmd")
+
+library(preProcessing)
+## source("R/batch_correction.R")
+## source("R/winsorization.R")
+
+```
+
+
+# Introduction
+
+In this Vignette, we describe the basic usage of the `preProcessing` package. This package is designed to be a "swiss army knife" in pre-processing bio-assay data. It implements several useful functions such as: a Hampel filter to detect and winsorize outliers; a wrapper function of drc() to estimate standard curves from multiple sets of training data; and a normalization procedure to correct batch effects, among others.
+
+# Methods 
+
+TBD.
+
+
+# Simulations
+
+## Outlier Detection and Winsorization
+
+```{r sim1-datagen, results='asis'}
+
+set.seed(111)
+n <- 240; nbatches <- 6; Bnames <- paste0("B",1:nbatches)
+batch <- sort(sample(Bnames, n, replace=TRUE))
+freqTab1 <- as.matrix(t(table(batch))); rownames(freqTab1) <- "N="
+kable(freqTab1, caption="Number of observations in each batch.")
+
+mu <- 8.0 #the overall mean
+s.Z <- 2.0       #STD of the "true expression"
+s.alpha <- 2.0 #STD of the additive batch effects (alpha)
+deltaBeta <- .9 #controls the variation of beta
+s.epsilon <- 0.25 #STD of the measurement error (epsilon)
+
+alphas <- s.alpha*rnorm(nbatches); names(alphas) <- Bnames
+## make the first alpha an outlier
+alphas[1] <- 15
+
+betas2 <- runif(nbatches, min=1-deltaBeta, max=1+deltaBeta)
+betas <- sqrt(betas2); names(betas) <- Bnames
+## make the second beta extremely small
+betas[2] <- 0.1
+
+Z <- s.Z*rnorm(n)
+epsilon <- s.epsilon*rnorm(n)
+Ystar <- Z +mu+epsilon #the "true" value
+
+mydata <- data.frame(batch=batch, alpha=alphas[batch], beta=betas[batch], Z=Z, epsilon=epsilon, Ystar=Ystar)
+
+## manually create some outliers
+out.prop <- 0.05
+is.outlier <- Z > quantile(Z, 1-out.prop)
+n.out <- sum(is.outlier) #number of outliers
+L.out <- 5; U.out <- 10
+outEffects <- runif(n.out, L.out, U.out)
+
+Y <- with(mydata, Z*beta +mu +alpha +epsilon)
+Y[is.outlier] <- Y[is.outlier]+outEffects
+
+mydata$Y <- Y; mydata$is.outlier <- is.outlier
+
+```
+
+We generate a simulated dataset with $n=`r n`$ observations by the following model
+
+\begin{equation}
+Y_{ij} = Z_{ij} \beta_{i} +\mu +\alpha_{i} +\epsilon_{ij}.
+\end{equation}
+
+Here $Y_{ij}$ represent the observed data in the $i$th batch. $Z_{ij} \sim N(0, \sigma_{Z}^{2})$ is a mean-zero latent factor. $\beta_{i}$ represents multiplicative batch effects, which is created such that $\beta_{i}^{2} \sim \mathrm{Unif}([1-\delta_{\beta}, 1+\delta_{\beta}])$. Note that by construction, we have $E(\beta_{i}^{2}) = 1$.
+
+$\alpha_{i} \sim N(0, \sigma_{\alpha}^{2})$ are additive batch effects; $\mu$ is the overall mean; and $\epsilon_{ij} \sim N(0, \sigma_{\epsilon}^{2})$ are measurement error.
+
+It is easy to derive the conditional and marginal expectation and variance of $Y_{ij}$ as follows
+
+\begin{equation}
+\begin{split}
+E(Y|\alpha_{i}, \beta_{i}) &= \mu +\alpha_{i}, \quad E(Y|\beta_{i}) = E(Y) = \mu. \\
+\mathrm{var}(Y|\alpha_{i}, \beta_{i}) &= \beta_{i}^{2} \sigma_{Z}^{2} +\sigma_{\epsilon}^{2}, \quad E(\mathrm{var}(Y|\alpha_{i}, \beta_{i})) = E(\beta_{i}^{2}) \cdot \sigma_{Z}^{2} +\sigma_{\epsilon}^{2} = \sigma_{Z}^{2} +\sigma_{\epsilon}^{2}. \\
+\mathrm{var}(Y) &= E(\mathrm{var}(Y|\alpha_{i},\beta_{i})) +\mathrm{var}(E(Y|\alpha_{i}, \beta_{i})) = \sigma_{Z}^{2} +\sigma_{\alpha}^{2} +\sigma_{\epsilon}^{2}.
+\end{split}
+\end{equation}
+
+We define the oracle batch-corrected values as $Y_{ij}^{*} := Z_{ij} +\mu +\epsilon$. Apparently, $E Y_{ij}^{*} = \mu$ matches the expectation of $Y_{ij}$; and $\mathrm{var}(Y_{ij}^{*}) = \sigma_{Z}^{2} +\sigma_{\epsilon}^{2}$ is the same as $E(\mathrm{var}(Y|\alpha_{i},\beta_{i}))$, which can be considered as the theoretical lower bound of $\mathrm{var}(Y_{ij})$, should there be no batch effects. 
+
+To make these data more realistic, we manually set $\alpha_{1} = `r alphas[1]`$ and $\beta_{2} = `r betas[2]`$, so that the first and second batches are outlying batches with extremely large additive and extremely small multiplicative batch effects.
+
+Furthermore, we select $n=`r n.out`$ values in the data with largest values of $Z_{ij}$, and manually added values sampled from $\mathrm{Unif}([`r L.out`, `r U.out`])$. This is to mimic the "overflow" behavior of certain bio-assay, in which an out-of-range high concentration value may be associated with an extremely large reading.
+
+A visualization of $Y_{ij}$ will be provided in Panel (a) in the boxplot later.
+
+
+```{r normalize-winsorize}
+
+## no trim
+rr0 <- normalize(mydata$Y, mydata$batch); Ynorm0 <- rr0$xnormed
+## using 20% trim
+rr2 <- normalize(mydata$Y, mydata$batch, trim=0.2); Ynorm2 <- rr2$xnormed
+
+## We apply GrpHampel() to Ynorm0 without "Grp=batch" option, so that
+## the thresholds in winsorization are uniformly applied to all batches. 
+nMAD <- 2
+Ynorm0.o <- GrpHampel(Ynorm0, nMAD=nMAD, winsorize=TRUE)
+Ynorm2.o <- GrpHampel(Ynorm2, nMAD=nMAD, winsorize=TRUE)
+
+mydata <- cbind(mydata, Ynorm0, Ynorm2, Ynorm0.o, Ynorm2.o)
+
+```
+
+We remove the batch effects by mean/STD normalization (implemented in function `normalize()`), with and without 20% trimming. After batch correction, we apply an outlier detector based on the Hampel filter, and winsorize those extreme values by $\mathrm{Med} \pm `r nMAD`\times \mathrm{MAD}$. These results are compared with the original observation in the following figure.
+
+```{r boxplot-Ynorm}
+#| fig.cap="Comparing the original, batch-corrected (with and without trimming), and winsorized data.",
+#| fig.width=12, fig.height=18,
+#| out.width="100%", out.height="100%"
+
+titles <- c("Y"="(a) Original data",
+            "Ynorm0"="(b) Batch corrected (no trimming)",
+            "Ynorm2"="(c) Batch corrected (with trimming)",
+            "Ynorm0.o"="(d) Batch corrected (no trimming) and winsorized",
+            "Ynorm2.o"="(e) Batch corrected (with trimming) and winsorized")
+par(mfrow=c(3,2))
+for (v in names(titles)){
+  Yv <- mydata[[v]]
+  boxplot2(Yv, batch, main=titles[v], xlab="Batch")
+}
+
+```
+
+In addition, we study the correlation between $Y^{*}$ and the original ($Y$) and processed data, recorded the proportion of variance explained by the batches before and after data processing. The results are presented in the following figure and table.
+
+```{r compare-with-Ystar, results='asis'}
+#| fig.cap="Comparing the original, batch-corrected (with and without trimming), and winsorized data. Solid line represent Y=X; dotted line is the regression line between the two variables.",
+#| fig.width=12, fig.height=12,
+#| out.width="100%", out.height="100%"
+
+sumtab1 <- matrix(0, nrow=5, ncol=length(titles))
+rownames(sumtab1) <- c("Correlation", "MSE", "varprop", "var-Med", "var-IQR")
+colnames(sumtab1) <- names(titles)
+par(mfrow=c(3,2))
+for (v in names(titles)){
+  Yv <- mydata[[v]]
+  sumtab1["Correlation",v] <- cor(Yv, Ystar, method="pearson")
+  sumtab1["MSE",v] <- mean((Yv-Ystar)^2)
+  sumtab1["varprop",v] <- varpropfun(mydata, Xvar=v, batchvar="batch")
+  sumtab1["var-Med",v] <- var(tapply(Yv, batch, median))
+  sumtab1["var-IQR",v] <- var(tapply(Yv, batch, IQR))
+  ## 
+  plot(Yv~Ystar, main=titles[v], xlab=expression('Y'^'*'), ylab=v)
+  abline(0,1); abline(lm(Yv~Ystar), lty=2)
+}
+kable(sumtab1, caption="Assessments of data pre-processing. Y: the original data; Ynorm0: batch corrected, without trimming; Ynorm2: batch corrected, with trimming; Ynorm0.o and Ynorm2.o: batch corrected (with and without trimming) and winsorized. Correlation: Pearson correlation between the oracle value (Y*) and the original and processed data. MSE: MSE between processed data and Y*. varprop: Proportion of variance explained by the batches. var-Med/var-IQR: Sample variance of per-batch median and IQR.")
+
+```
+
+
+From the above figures and the correlation table, we conclude that:
+
+1. Batch correction can greatly reduce the variability in the data.
+2. By using 20% trimming, we achieve better consistency across batches: boxes in panel (c) are more uniform than those in panel (b); and var-Med and var-IQR measures in the summary table are much reduced with trimming.
+3. Winsorization greatly reduce the impact of outliers.
+
+
+## Case II
+
+Now let us generate $\tilde{Y}_{ij}$ in this way. All $\alpha_{i}$ are set to zero, with the exception that $\alpha_{1} = `r alphas[1]`$. All $\beta_{i}$ are st to one, with the exception that $\beta_{2} = `r betas[2]`$. In other words, only batch 1 and 2 suffers from very severe batch effects; all other batches do not need to be corrected.  In this case, it is best to first identify them and only apply batch correction to the problematic batches.
+
+```{r selective-batch-norm}
+
+## generate Ytilde
+alphas.t <- rep(0, nbatches); names(alphas.t) <- Bnames
+alphas.t[1] <- alphas[1]
+betas.t <- rep(1, nbatches); names(betas.t) <- Bnames
+betas.t[2] <- betas[2]
+mydata.t <- data.frame(batch=batch, alpha=alphas.t[batch], beta=betas.t[batch], Z=Z, epsilon=epsilon, Ystar=Ystar)
+Y.t <- with(mydata.t, Z*beta +mu +alpha +epsilon)
+Y.t[is.outlier] <- Y.t[is.outlier]+outEffects
+mydata.t$Y.t <- Y.t; mydata.t$is.outlier <- is.outlier
+
+#################### batch correction ####################
+##no trimming
+rr0t <- BatchNormalize(Y.t, batch, nMAD=1.5); Ynorm0.t <- rr0t$xnormed
+##20% trimming
+rr2t <- BatchNormalize(Y.t, batch, nMAD=1.5, trim=0.2); Ynorm2.t <- rr2t$xnormed
+
+## correcting for all batches (over-correction). Note that using
+## normalize() is equivalent to rr2at <- BatchNormalize(Y.t, batch,
+## nMAD=0, trim=0.2)
+rr2at <- normalize(Y.t, batch, trim=0.2)
+Ynorm2a.t <- rr2at$xnormed
+
+#################### winsorization ####################
+nMAD <- 2
+Ynorm0.o.t <- GrpHampel(Ynorm0.t, nMAD=nMAD, winsorize=TRUE)
+Ynorm2.o.t <- GrpHampel(Ynorm2.t, nMAD=nMAD, winsorize=TRUE)
+Ynorm2a.o.t <- GrpHampel(Ynorm2a.t, nMAD=nMAD, winsorize=TRUE)
+
+
+mydata.t <- cbind(mydata.t, Ynorm0.t, Ynorm2.t, Ynorm0.o.t, Ynorm2.o.t, Ynorm2a.o.t)
+
+```
+
+Visualizations and a summary table are given as below.
+
+```{r boxplot-Ynorm-tilde}
+#| fig.cap="Comparing the original, batch-corrected (with and without trimming), and winsorized data, using Ytilde.",
+#| fig.width=12, fig.height=18,
+#| out.width="100%", out.height="100%"
+
+titles.t <- c("Y.t"="(a) Original data",
+            "Ynorm0.t"="(b) Selective batch correction (no trimming)",
+            "Ynorm2.t"="(c) Selective batch correction (with trimming)",
+            "Ynorm0.o.t"="(d) Selective Batch correction (no trimming) and winsorization",
+            "Ynorm2.o.t"="(e) Selective Batch correction (with trimming) and winsorization",
+            "Ynorm2a.o.t"="(f) All batch are corrected (with trimming) and winsorized")
+par(mfrow=c(3,2))
+for (v in names(titles.t)){
+  Yv <- mydata.t[[v]]
+  boxplot2(Yv, batch, main=titles.t[v], xlab="Batch")
+}
+
+```
+
+
+```{r compare-with-Ystar-tilde, results='asis'}
+#| fig.cap="Comparing the original, batch-corrected (with and without trimming), and winsorized data, using selective batch correction. Solid line represent Y=X; dotted line is the regression line between the two variables.",
+#| fig.width=12, fig.height=12,
+#| out.width="100%", out.height="100%"
+
+sumtab2 <- matrix(0, nrow=5, ncol=length(titles.t))
+rownames(sumtab2) <- c("Correlation", "MSE", "varprop", "var-Med", "var-IQR")
+colnames(sumtab2) <- names(titles.t)
+par(mfrow=c(3,2))
+for (v in names(titles.t)){
+  Yv <- mydata.t[[v]]
+  sumtab2["Correlation",v] <- cor(Yv, Ystar, method="pearson")
+  sumtab2["MSE",v] <- mean((Yv-Ystar)^2)
+  sumtab2["varprop",v] <- varpropfun(mydata.t, Xvar=v, batchvar="batch")
+  sumtab2["var-Med",v] <- var(tapply(Yv, batch, median))
+  sumtab2["var-IQR",v] <- var(tapply(Yv, batch, IQR))
+  ## 
+  plot(Yv~Ystar, main=titles.t[v], xlab=expression('Y'^'*'), ylab=v)
+  abline(0,1); abline(lm(Yv~Ystar), lty=2)
+}
+kable(sumtab2, caption="Assessments of data pre-processing. Y.t: the original data; Ynorm0.t: batch corrected, without trimming; Ynorm2.t: batch corrected, with trimming; Ynorm0.o.t and Ynorm2.o.t: batch corrected (with and without trimming) and winsorized; Ynorm2a.o.t: all batches are corrected (with trimming) and winsorized. Correlation: Pearson correlation between the oracle value (Y*) and the original and processed data. MSE: MSE between processed data and Y*. varprop: Proportion of variance explained by the batches. var-Med/var-IQR: Sample variance of per-batch median and IQR.")
+
+```
+
+Our conclusion for this simulation is similar to those made for Case I, with one important addition: over-correction, namely, applying batch correction to all batches (Ynorm2a.o.t) has high correlation, low varprop and low var-Med, but the MSE is slightly larger than that of the selective batch correction (Ynorm2.o.t). 
+
+Given these observations, we conclude that:
+
+1. If the goal of pre-processing is to minimize the discrepancy (in terms of MSE) between the processed data and the oracle values ($Y^*$), data processed with selective batch correction (with trimming) and winsorization (Ynorm2.o.t) are the best results.
+2. If the goal is to obtain the highest correlation and lowest cross-batch heterogeneity (measured by low varprop, var-Med, and var-IQR), we should simply apply batch correction to all batches.
+
+
+
+# Real Data Analysis: Fitting and Using Standard Curves
+
+This package comes with two datasets: `sdata`, a dataset for estimating the standard curves; and  `obdata`, a dataset containing the observed cytokine (CRP and Leptin) levels.
+
+```{r fit.standard.curves}
+
+# Fitting the Standard Curves
+CRP.lot1.s <- subset(sdata, Analyte=="CRP"&Lot=="Lot 1")
+Leptin.lot1.s <- subset(sdata, Analyte=="Leptin"&Lot=="Lot 1")
+
+rr.CRP.lot1 <- multidrm(FI.Bkgd~Exp.Conc, batchid="Run", dataset=CRP.lot1.s, logdist=FALSE)
+rr.Leptin.lot1 <- multidrm(FI.Bkgd~Exp.Conc, batchid="Run", dataset=Leptin.lot1.s, logdist=FALSE)
+
+## extract the coefficients
+coefs.CRP.lot1 <- coef(rr.CRP.lot1$MeanSC)
+coefs.Leptin.lot1 <- coef(rr.Leptin.lot1$MeanSC)
+
+```
+
+```{r plot.SCs}
+#| fig.cap="Standard curves estimated from the training cytokine data (sdata).",
+#| fig.width=12, fig.height=6,
+#| out.width="100%", out.height="100%"
+
+## plot the curves
+c1 <- "black"; c2 <- "blue"; c3 <- "red";c4 <- "green"
+l1 <- 0.4; l2 <- 3; l3 <- .6
+
+MeanSC <- rr.CRP.lot1$MeanSC
+outSCs <- rr.CRP.lot1$SCs[rr.CRP.lot1$out.ids]
+goodSCs <- rr.CRP.lot1$SCs[-rr.CRP.lot1$out.ids]
+xmax <- rr.CRP.lot1$xmax; ymax <- rr.CRP.lot1$ymax
+
+par(mfrow=c(1,2))
+plot(MeanSC, col=c1, xlim=c(1, xmax), ylim=c(0, ymax), lwd=l2, main="CRP")
+for (sc in goodSCs) plot(sc, col=c1, lwd=l1, lty=6, add=TRUE)
+for (sc in outSCs) plot(sc, col=c3, lwd=l3, lty=1, add=TRUE)
+## 
+MeanSC <- rr.Leptin.lot1$MeanSC
+outSCs <- rr.Leptin.lot1$SCs[rr.Leptin.lot1$out.ids]
+if (length(rr.Leptin.lot1$out.ids)==0) {
+  goodSCs <- rr.Leptin.lot1$SCs
+} else {
+  goodSCs <- rr.Leptin.lot1$SCs[-rr.Leptin.lot1$out.ids]
+}
+xmax <- rr.Leptin.lot1$xmax; ymax <- rr.Leptin.lot1$ymax
+## 
+plot(MeanSC, col=c1, xlim=c(1, xmax), ylim=c(0, ymax), lwd=l2, main="Leptin")
+for (sc in goodSCs) plot(sc, col=c1, lwd=l1, lty=6, add=TRUE)
+for (sc in outSCs) plot(sc, col=c3, lwd=l3, lty=1, add=TRUE)
+
+
+```
+
+
+
+The fitted standard curves can then be applied to the observed data.
+
+```{r apply-SCs}
+#| fig.cap="Applying the standard curves trained from sdata to the observed cytokine data (obdata).",
+#| fig.width=6, fig.height=6,
+#| out.width="75%", out.height="75%"
+
+## applying the trained mean standard curves to the observed data
+ids <- which(obdata$Analyte=="Leptin" & obdata$Lot=="Lot 1")
+Conc.mean.Leptin.lot1 <- LL5inv(obdata$FI.Bkgd[ids], params=coefs.Leptin.lot1)
+## compare with the original concentrations 
+Conc.orig.Leptin.lot1 <- obdata$Conc.orig[ids]
+plot(Conc.mean.Leptin.lot1~Conc.orig.Leptin.lot1, main="Leptin"); abline(0,1)
+
+
+```
+

@@ -1,0 +1,14 @@
+## automatically load pkg1 and pkg2
+## import(pkg1, pkg2)
+
+## load objs from different packages
+## importFrom(pkg1, obj1, obj2)
+## importFrom(pkg2, obj3)
+importFrom("stats", "IQR", "aov", "coef", "mad", "median", "sd", "terms", "var", "quantile", "approx")
+importFrom("drc", "drm")
+
+## Only export these objs to the search path for the end user
+## export(obj1, obj2)
+
+## Export everything which starts with a letter.
+exportPattern("^[[:alpha:]]+")

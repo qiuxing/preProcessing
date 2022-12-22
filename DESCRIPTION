@@ -1,0 +1,14 @@
+Package: preProcessing
+Title: Useful functions for bio-assay data pre-processing 
+Version: 1.0.0
+Author: Xing Qiu
+Description: An introduction, could be 20 lines long.
+Maintainer: Xing Qiu <xing.qiu@gmail.com>
+Depends: R (>= 4.0.0), drc
+Suggests: knitr, rmarkdown
+VignetteBuilder: knitr, rmarkdown
+Imports:
+Enhances:
+License: LGPL
+LazyLoad: yes
+LazyData: true
