@@ -15,3 +15,4 @@ Read "Writing R Extensions" for more information about writing an R package.
   2. All functions needs to be checked thoroughly.
   3. The manual page of each function should include a few simple examples.
   4. The vignette needs can be expanded into a mini-paper in the future.
+  
